@@ -1,0 +1,27 @@
+services:
+  api:
+    build: .
+    env_file: [{path: .env, required: false}]
+    environment:
+      DATABASE_URL: sqlite:////data/hello_agent.db
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+    volumes: [data:/data]
+    ports: ["8000:8000"]
+    depends_on: [jaeger]
+
+  ui:
+    build: .
+    command: ["streamlit", "run", "ui/dashboard.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+    environment:
+      API_URL: http://api:8000
+      JAEGER_UI_URL: http://localhost:16686
+    ports: ["8501:8501"]
+    depends_on: [api]
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment: {COLLECTOR_OTLP_ENABLED: "true"}
+    ports: ["16686:16686", "4318:4318"]
+
+volumes:
+  data:

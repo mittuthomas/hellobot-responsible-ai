@@ -1,0 +1,5 @@
+__pycache__/
+*.db
+.env
+eval_report.json
+.pytest_cache/
