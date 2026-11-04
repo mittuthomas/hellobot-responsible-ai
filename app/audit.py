@@ -31,7 +31,7 @@ class Run(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex[:12])
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     status: Mapped[str] = mapped_column(String(32), default="running")
-    # running | pending_approval | completed | blocked
+    # running | pending_approval | completed | blocked | failed
     input_sha256: Mapped[str] = mapped_column(String(64))
     input_sanitized: Mapped[str] = mapped_column(Text)
     output: Mapped[str | None] = mapped_column(Text, nullable=True)

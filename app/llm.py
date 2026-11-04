@@ -239,6 +239,11 @@ def _stub_chat(messages, tools) -> LLMResponse:
             return _text("I wasn't able to send that greeting — a human reviewer declined it. "
                          "Let me know if you'd like to change anything.")
         return _text(f"Done! ✅ {last.content}")
+    if tools and "my name" in body.lower():   # remembers a name given earlier in the conversation
+        earlier = " ".join(m.text for m in messages[:-1] if isinstance(m, HumanMessage))
+        known = re.search(r"my name is (\w+)", earlier, re.I)
+        return _text(f"Hello again! You told me your name is {known.group(1)}." if known
+                     else "Hello! I don't think you've told me your name yet.")
     if tools and "email" in body.lower():
         words = body.replace(",", " ").split()
         name = next((w for w in words if w[:1].isupper() and w.lower() not in ("please", "email", "hello", "hi")), "Friend")

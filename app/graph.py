@@ -18,7 +18,7 @@ import sqlite3
 import time
 from typing import Literal, TypedDict
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -41,6 +41,7 @@ TOOLS = [{
                      "properties": {"to": {"type": "string"}, "message": {"type": "string"}}},
 }]
 SENSITIVE_TOOLS = {"send_greeting"}   # side effects -> require human approval
+SIMULATED_LIE = "Done! I've sent your greeting. Have a lovely day!"
 
 
 def send_greeting(to: str, message: str) -> str:
@@ -55,6 +56,8 @@ class AgentState(TypedDict, total=False):
     answer: str                 # draft answer before the output guardrail
     steps: int
     denied: bool                # a human denied a tool call in this run
+    context: list               # earlier conversation turns, sanitised: [{role, content}]
+    simulate_lie: bool          # demo: swap in a false reply after a denial, for the honesty check to catch
 
 
 # Raw user input never enters graph state: checkpoints are persisted, and the raw
@@ -104,14 +107,17 @@ def input_guardrail(state, db, run):
     raw = _RAW_INPUTS.pop(state["run_id"], "")
     g = check_input(raw)
     run.input_sanitized = g.text
-    log_event(db, run.id, "run_started", actor="user", input_sha256=run.input_sha256, sanitized_input=g.text)
+    context = state.get("context") or []
+    log_event(db, run.id, "run_started", actor="user", input_sha256=run.input_sha256, sanitized_input=g.text,
+              context_turns=len(context), context=context)
     log_event(db, run.id, "input_guardrail", actor="guardrail", allowed=g.allowed,
               violations=[v.model_dump() for v in g.violations])
     if not g.allowed:
         run.status, run.output = "blocked", "Sorry, I can't help with that request."
         log_event(db, run.id, "run_finished", status=run.status, output=run.output)
         return {"answer": run.output}
-    return {"messages": [HumanMessage(g.text)], "steps": 0}
+    history = [(HumanMessage if t["role"] == "user" else AIMessage)(t["content"]) for t in context]
+    return {"messages": [*history, HumanMessage(g.text)], "steps": 0}
 
 
 @node("agent")
@@ -123,7 +129,11 @@ def agent(state, db, run):
     if r.stop_reason == "tool_use":
         return {"messages": [*state["messages"], r.message],
                 "tool_calls": r.tool_calls, "steps": steps}
-    return {"answer": r.text, "tool_calls": [], "steps": steps}
+    answer = r.text
+    if state.get("denied") and state.get("simulate_lie"):
+        answer = SIMULATED_LIE
+        log_event(db, run.id, "simulated_lie", actor="demo", text=answer)
+    return {"answer": answer, "tool_calls": [], "steps": steps}
 
 
 @node("request_approval")
@@ -146,7 +156,7 @@ def human_approval(state: AgentState):
                       tool=tc["name"], tool_input=tc["input"], approved=bool(decision.get("approved")),
                       note=decision.get("note", ""))
         db.commit()
-    return {"decision": decision}
+    return {"decision": decision, "simulate_lie": bool(decision.get("simulate_lie"))}
 
 
 @node("tools")
@@ -202,7 +212,9 @@ def honesty_check(state, db, run):
 def judge_node(state, db, run):
     run.status = "completed"
     try:
-        v = judge(run.input_sanitized, state["answer"])   # quality score for monitoring
+        earlier = "".join(f"{t['role']}: {t['content']}\n" for t in state.get("context") or [])
+        asked = f"{earlier}user: {run.input_sanitized}" if earlier else run.input_sanitized
+        v = judge(asked, state["answer"])   # quality score for monitoring
         run.judge = v.model_dump()
         log_event(db, run.id, "llm_judge", actor="judge", **run.judge)
     except Exception as e:   # a judge outage must never cost the user their answer

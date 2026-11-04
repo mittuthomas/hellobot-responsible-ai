@@ -1,7 +1,8 @@
 """FastAPI service. Interactive OpenAPI docs at /docs."""
+from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
@@ -9,19 +10,31 @@ from app import agent
 from app.audit import AuditEvent, Run, SessionLocal, llm_calls, summarize_llm_calls, verify_chain
 from app.config import settings
 
-app = FastAPI(title="HelloBot - Responsible AI Agent",
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    agent.fail_orphaned_runs()
+    yield
+
+
+app = FastAPI(title="HelloBot - Responsible AI Agent", lifespan=lifespan,
               description="Guardrails · Observability & Audit · Evals · Human-in-the-loop · LLM-as-judge",
               version="1.0.0")
 
 
 class ChatIn(BaseModel):
     message: str = Field(..., examples=["Please email a hello to Alice at alice@example.com"])
+    context_run_ids: list[str] = Field(default=[], description="Earlier runs in this conversation, oldest first")
+    background: bool = Field(default=False, description="Return at once and poll the run for progress")
 
 
 class DecisionIn(BaseModel):
     approved: bool
     approver: str = "reviewer"
     note: str = ""
+    simulate_lie: bool = Field(default=False, description="Demo: swap in a false reply after a denial, "
+                                                          "to show the honesty check catching it")
+    background: bool = Field(default=False, description="Return at once and poll the run for progress")
 
 
 class RunOut(BaseModel):
@@ -56,16 +69,26 @@ def health():
 
 
 @app.post("/api/chat", response_model=RunOut, tags=["agent"])
-def chat(body: ChatIn):
-    return agent.start(body.message)
+def chat(body: ChatIn, tasks: BackgroundTasks):
+    context = agent.context_from_runs(body.context_run_ids)
+    if not body.background:
+        return agent.start(body.message, context)
+    run = agent.create(body.message)
+    tasks.add_task(agent.in_background, agent.execute, run.id, body.message, context)
+    return run
 
 
 @app.post("/api/runs/{run_id}/decision", response_model=RunOut, tags=["human-in-the-loop"])
-def decide(run_id: str, body: DecisionIn):
+def decide(run_id: str, body: DecisionIn, tasks: BackgroundTasks):
     try:
-        return agent.decide(run_id, body.approved, body.approver, body.note)
+        agent.claim_decision(run_id)
     except ValueError as e:
         raise HTTPException(409, str(e))
+    args = (run_id, body.approved, body.approver, body.note, body.simulate_lie)
+    if not body.background:
+        return agent.resume(*args)
+    tasks.add_task(agent.in_background, agent.resume, *args)
+    return get_run(run_id)
 
 
 @app.get("/api/approvals", response_model=list[RunOut], tags=["human-in-the-loop"])
@@ -79,6 +102,15 @@ def pending_approvals():
 def list_runs(limit: int = 50):
     with SessionLocal() as db:
         return db.scalars(select(Run).order_by(Run.created_at.desc()).limit(limit)).all()
+
+
+@app.get("/api/runs/{run_id}", response_model=RunOut, tags=["audit"])
+def get_run(run_id: str):
+    with SessionLocal() as db:
+        run = db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(404, "run not found")
+    return run
 
 
 @app.get("/api/runs/{run_id}/events", response_model=list[EventOut], tags=["audit"])
@@ -109,6 +141,7 @@ def metrics():
         guard = db.scalars(select(AuditEvent).where(AuditEvent.event.in_(["input_guardrail", "output_guardrail"]))).all()
         tokens = db.execute(select(func.sum(Run.total_input_tokens), func.sum(Run.total_output_tokens))).one()
         calls = [e.data for e in llm_calls(db)]
+        decisions = db.scalars(select(AuditEvent).where(AuditEvent.event == "human_decision")).all()
     scores = [r.judge["score"] for r in runs]
     policies: dict = {}
     for e in guard:
@@ -118,6 +151,8 @@ def metrics():
     return {"llm": {**summarize_llm_calls(calls), "avg_duration_ms": round(sum(timed) / len(timed), 1) if timed else None},
             "runs_by_status": by_status, "avg_judge_score": round(sum(scores) / len(scores), 2) if scores else None,
             "judge_pass_rate": round(sum(r.judge["passed"] for r in runs) / len(runs), 2) if runs else None,
+            "human_decisions": {"approved": sum(bool(e.data.get("approved")) for e in decisions),
+                                "denied": sum(not e.data.get("approved") for e in decisions)},
             "guardrail_hits": policies, "input_tokens": tokens[0] or 0, "output_tokens": tokens[1] or 0}
 
 
@@ -131,3 +166,31 @@ def agent_graph():
 def run_evals():
     from evals.runner import run_suite
     return run_suite()
+
+
+@app.post("/api/evals/jobs", tags=["evals"])
+def start_eval_job(tasks: BackgroundTasks):
+    """Run the suite in the background; poll the job for per-case progress."""
+    from evals.runner import create_job, run_job
+    job, is_new = create_job()
+    if is_new:
+        tasks.add_task(run_job, job)
+    return job
+
+
+@app.get("/api/evals/jobs/{job_id}", tags=["evals"])
+def eval_job(job_id: str):
+    from evals.runner import JOBS
+    if job_id not in JOBS:
+        raise HTTPException(404, "job not found")
+    return JOBS[job_id]
+
+
+@app.post("/api/evals/jobs/{job_id}/stop", tags=["evals"])
+def stop_eval_job(job_id: str):
+    """Stops after the case in progress; the report covers the cases that finished."""
+    from evals.runner import JOBS
+    if job_id not in JOBS:
+        raise HTTPException(404, "job not found")
+    JOBS[job_id]["stop_requested"] = True
+    return JOBS[job_id]
