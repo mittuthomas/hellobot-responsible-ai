@@ -149,6 +149,8 @@ form.ask input { flex: 1; min-width: 0; border: 1px solid var(--line); backgroun
 .ev .head b { font-weight: 600; }
 .ev details summary { cursor: pointer; color: var(--muted); font-size: 0.82rem; }
 .ev pre { margin: 6px 0 0; background: var(--sunk); padding: 8px 10px; border-radius: 6px; overflow-x: auto; font-family: var(--font-mono); font-size: 0.76rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ev .llm-meta { font-size: 0.72rem; margin-top: 2px; }
+.ev pre.llm { max-height: 320px; overflow-y: auto; }
 .hash { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); }
 .hash.broken { color: var(--bad); font-weight: 600; }
 
@@ -367,12 +369,27 @@ function parseJSON(text) {
   const m = String(text).match(/\{[\s\S]*\}/);
   return JSON.parse(m ? m[0] : text);
 }
-async function ask(prompt, { json = false, fresh = true } = {}) {
-  if (offline) return stub(prompt, json);
-  const opts = { modelTier: "quick" };
-  if (fresh) opts.cache = false;
-  const { text } = await sample(prompt, opts);
-  return json ? parseJSON(text) : text.trim();
+// Every model call goes through here and returns { value, call }, where `call` is the
+// exact prompt sent and the full raw answer, so the audit trail can show both.
+async function askTraced(prompt, { json = false, fresh = true } = {}) {
+  const t0 = performance.now();
+  const call = { tier: offline ? "offline-stub" : "quick", prompt, output: "", latency_ms: 0 };
+  let raw;
+  try {
+    if (offline) { const v = stub(prompt, json); raw = typeof v === "string" ? v : JSON.stringify(v, null, 2); }
+    else {
+      const opts = { modelTier: "quick" };
+      if (fresh) opts.cache = false;
+      raw = (await sample(prompt, opts)).text;
+    }
+  } catch (e) {
+    call.output = (e && e.text) || ""; call.latency_ms = Math.round(performance.now() - t0);
+    if (e && typeof e === "object") e.call = call;
+    throw e;
+  }
+  call.output = raw; call.latency_ms = Math.round(performance.now() - t0);
+  try { return { value: json ? parseJSON(raw) : raw.trim(), call }; }
+  catch (e) { e.call = call; throw e; }   // unparseable JSON: keep the raw answer for the audit
 }
 function stub(prompt, json) {
   if (prompt.startsWith(JUDGE_RULES)) {
@@ -486,13 +503,13 @@ async function startRun(rawInput, { ephemeral = false, context = [] } = {}) {
   const redacted = g.violations.filter((v) => v.action === "redact").map((v) => v.detail);
   stage(run, "input", redacted.length ? "warn" : "ok", redacted.length ? "Redacted " + redacted.join(", ") : "Passed");
   stage(run, "agent", "active", "Thinking…");
-  let decision;
+  let decision, agentCall;
   try {
-    decision = await ask(`${AGENT_RULES}\nUse the conversation so far to resolve references like "her", "that address" or "my name".\n\n${transcript(context)}USER MESSAGE:\n${g.text}`, { json: true, fresh: !ephemeral });
+    ({ value: decision, call: agentCall } = await askTraced(`${AGENT_RULES}\nUse the conversation so far to resolve references like "her", "that address" or "my name".\n\n${transcript(context)}USER MESSAGE:\n${g.text}`, { json: true, fresh: !ephemeral }));
   } catch (e) {
     return failRun(run, e);
   }
-  await logEvent(run, "llm_call", "agent", { model: run.model, context_turns: context.length, decision });
+  await logEvent(run, "llm_call", "agent", { model: run.model, context_turns: context.length, decision, llm: agentCall });
   if (decision.action === "send_greeting" && decision.to) {
     stage(run, "agent", "ok", "Wants send_greeting");
     stage(run, "human", "warn", "Awaiting approval");
@@ -517,11 +534,11 @@ async function decide(run, approved, approverId, note) {
   await logEvent(run, "tool_result", "tool", { tool: t.tool, executed: approved, result });
   run.pending = null;
   stage(run, "agent", "active", "Writing reply…");
-  let reply;
+  let reply, replyCall;
   try {
-    reply = await ask(`You are HelloBot, a friendly assistant.\n${transcript(run.context)}The user's latest message was: "${run.input}".\nYou requested the send_greeting tool.\nTOOL RESULT: ${result}\nWrite a short, honest reply (1-2 sentences) telling the user what happened. If it was denied, say clearly that nothing was sent. Plain text only.`, { fresh: !run.ephemeral });
+    ({ value: reply, call: replyCall } = await askTraced(`You are HelloBot, a friendly assistant.\n${transcript(run.context)}The user's latest message was: "${run.input}".\nYou requested the send_greeting tool.\nTOOL RESULT: ${result}\nWrite a short, honest reply (1-2 sentences) telling the user what happened. If it was denied, say clearly that nothing was sent. Plain text only.`, { fresh: !run.ephemeral }));
   } catch (e) { return failRun(run, e); }
-  await logEvent(run, "llm_call", "agent", { model: run.model, reply });
+  await logEvent(run, "llm_call", "agent", { model: run.model, reply, llm: replyCall });
   stage(run, "agent", "ok", "Replied");
   return finishRun(run, reply);
 }
@@ -536,10 +553,14 @@ async function finishRun(run, answer) {
   if (!run.ephemeral) {
     stage(run, "judge", "active", "Scoring…");
     try {
-      run.judge = await judge(transcript(run.context) + "Latest user message: " + run.input, run.output);
+      const jt = {};
+      run.judge = await judge(transcript(run.context) + "Latest user message: " + run.input, run.output, "", jt);
       stage(run, "judge", run.judge.passed ? "ok" : "bad", `${run.judge.score}/5 ${run.judge.passed ? "pass" : "fail"}`);
-      await logEvent(run, "llm_judge", "judge", run.judge);
-    } catch (e) { stage(run, "judge", "bad", "Unavailable"); }
+      await logEvent(run, "llm_judge", "judge", { ...run.judge, llm: jt.call });
+    } catch (e) {
+      stage(run, "judge", "bad", "Unavailable");
+      await logEvent(run, "error", "judge", { code: e && e.code, message: (e && e.message) || "Judge call failed", llm: e && e.call });
+    }
   }
   await logEvent(run, "run_finished", "agent", { status: run.status, output: run.output });
   return run;
@@ -547,12 +568,13 @@ async function finishRun(run, answer) {
 async function failRun(run, e) {
   stage(run, "agent", "bad", errorCopy(e));
   run.status = "completed"; run.output = "Sorry, I couldn't reach Claude just now. " + errorCopy(e);
-  await logEvent(run, "error", "agent", { code: e && e.code, message: e && e.message });
+  await logEvent(run, "error", "agent", { code: e && e.code, message: e && e.message, llm: e && e.call });
   await logEvent(run, "run_finished", "agent", { status: run.status, output: run.output });
   return run;
 }
-async function judge(input, answer, expected = "") {
-  const v = await ask(`${JUDGE_RULES}\n\nUSER INPUT:\n${input}\n\n${expected ? `EXPECTED BEHAVIOUR:\n${expected}\n\n` : ""}AGENT ANSWER:\n${answer}`, { json: true });
+async function judge(input, answer, expected = "", trace = {}) {
+  const { value: v, call } = await askTraced(`${JUDGE_RULES}\n\nUSER INPUT:\n${input}\n\n${expected ? `EXPECTED BEHAVIOUR:\n${expected}\n\n` : ""}AGENT ANSWER:\n${answer}`, { json: true });
+  trace.call = call;
   return { score: Math.max(0, Math.min(5, Number(v.score) || 0)), passed: !!v.passed, reasoning: String(v.reasoning || "") };
 }
 function errorCopy(e) {
@@ -650,7 +672,24 @@ function evSummary(e) {
   }
   return "";
 }
+const openDetails = new Set();   // which collapsible sections the viewer opened, kept across re-renders
+function keptDetails(key, summary, ...body) {
+  const d = el("details", {}, el("summary", { text: summary }), ...body);
+  if (openDetails.has(key)) d.open = true;
+  d.addEventListener("toggle", () => { d.open ? openDetails.add(key) : openDetails.delete(key); });
+  return d;
+}
+function llmSections(key, call) {
+  if (!call) return [];
+  const chars = (t) => `${(t || "").length.toLocaleString()} chars`;
+  return [
+    el("div", { class: "llm-meta mono muted", text: `model tier ${call.tier} · ${call.latency_ms.toLocaleString()} ms` }),
+    keptDetails(key + ":in", `Input sent to Claude (${chars(call.prompt)})`, el("pre", { class: "llm", text: call.prompt })),
+    keptDetails(key + ":out", `Full output from Claude (${chars(call.output)})`, el("pre", { class: "llm", text: call.output || "(empty)" })),
+  ];
+}
 function renderTimeline(container, run, brokenAt = -1) {
+  const scope = container.id + ":" + (run ? run.id : "");
   container.replaceChildren();
   if (!run || !run.events.length) { container.append(el("div", { class: "empty", text: "No events yet." })); return; }
   run.events.forEach((e, i) => {
@@ -659,8 +698,9 @@ function renderTimeline(container, run, brokenAt = -1) {
       el("div", {},
         el("div", { class: "head" }, el("b", { text: EV_LABEL[e.event] || e.event }), el("span", { class: "mono muted", text: fmtTime(e.ts) }), el("span", { class: "mono muted", text: "by " + (e.actor.startsWith("u_") ? who(e.actor) : e.actor) })),
         el("div", { text: evSummary(e) }),
-        el("details", {}, el("summary", { text: "Event data and hash" }),
-          el("pre", { text: JSON.stringify(e.data, null, 2) }),
+        ...llmSections(`${scope}:${i}`, e.data && e.data.llm),
+        keptDetails(`${scope}:${i}:data`, "Event data and hash",
+          el("pre", { text: JSON.stringify(e.data && e.data.llm ? { ...e.data, llm: "(shown above as input and full output)" } : e.data, null, 2) }),
           el("div", { class: "hash" + (broken ? " broken" : ""), text: `${broken ? "CHAIN BROKEN · " : ""}hash ${e.hash.slice(0, 16)}… ← prev ${e.prev.slice(0, 16)}…` })))));
   });
 }
