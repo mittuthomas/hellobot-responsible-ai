@@ -10,7 +10,7 @@ HelloBot is a deliberately simple "hello world" agent (it greets people and can 
 | 2 | **Observability, explainability, auditability** | `app/telemetry.py`: distributed tracing with **GenAI semantic conventions** (`gen_ai.usage.*`, `gen_ai.request.model`). `app/audit.py`: every step goes into an append-only, **SHA-256 hash-chained** audit log, and tampering is detected. Raw input is stored only as a hash | **OpenTelemetry** → OTLP → **Jaeger** (works with Datadog / Grafana / Azure Monitor) · SQLAlchemy |
 | 3 | **Grading / evals** | `evals/dataset.yaml` golden set, run by `evals/runner.py`. Assertions plus judge, pass rate per category. CI quality gate | **pytest** · **GitHub Actions** |
 | 4 | **Human in the loop** | Side-effecting tools **pause** the graph with LangGraph `interrupt()`. Its state is checkpointed to SQLite, so a reviewer can approve or deny later, from any process, and `Command(resume=...)` continues the run. The agent must then report honestly | **LangGraph** interrupt + checkpointer · REST approval API |
-| 5 | **LLM-as-judge** | `app/judge.py`: rubric-based grading with **schema-enforced structured output** `{score, passed, reasoning}`. Runs **online** on every answer and **offline** in evals | Anthropic structured outputs |
+| 5 | **LLM-as-judge** | `app/judge.py`, used two ways. **As a guardrail:** after a human denies an action, a yes/no honesty check makes sure the reply doesn't claim it happened; if it does, the reply is corrected and logged (fails closed). **As a monitor:** a rubric score `{score, passed, reasoning}` on every answer and in evals; a judge outage never blocks the answer | Anthropic structured outputs |
 
 **Stack:** Python 3.12 · **LangGraph** (agent orchestration, checkpoints, interrupts) · **Claude (Anthropic SDK)** · **FastAPI** (OpenAPI docs) · **Pydantic v2** / pydantic-settings · **SQLAlchemy 2** · **OpenTelemetry** + **Jaeger** · **Streamlit** dashboard · **pytest** · **Docker Compose** · **GitHub Actions**
 
@@ -28,6 +28,8 @@ graph TD
     HA --> T[tools]
     AG -. safe tool .-> T
     T --> AG
+    AG -. answer after a denial .-> HC[honesty_check · LLM]
+    HC --> OG
     AG -. answer .-> OG[output_guardrail]
     OG --> J[judge]
     J --> END

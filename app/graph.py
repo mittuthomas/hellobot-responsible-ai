@@ -25,7 +25,7 @@ from app import llm
 from app.audit import Run, SessionLocal, log_event
 from app.config import settings
 from app.guardrails import check_input, check_output
-from app.judge import judge
+from app.judge import SAFE_DENIAL_REPLY, check_honesty, judge
 from app.telemetry import current_trace_id, tracer
 
 SYSTEM = ("You are HelloBot, a friendly assistant. Greet people warmly and briefly. "
@@ -53,6 +53,7 @@ class AgentState(TypedDict, total=False):
     decision: dict              # the human reviewer's decision
     answer: str                 # draft answer before the output guardrail
     steps: int
+    denied: bool                # a human denied a tool call in this run
 
 
 # Raw user input never enters graph state: checkpoints are persisted, and the raw
@@ -155,7 +156,7 @@ def tools(state, db, run):
             results.append({"type": "tool_result", "tool_use_id": tc["id"], "content": out, "is_error": True})
         log_event(db, run.id, "tool_result", actor="tool", tool=tc["name"], result=out)
     return {"messages": [*state["messages"], {"role": "user", "content": results}],
-            "tool_calls": [], "decision": {}}
+            "tool_calls": [], "decision": {}, "denied": state.get("denied", False) or not approved}
 
 
 @node("output_guardrail")
@@ -168,11 +169,32 @@ def output_guardrail(state, db, run):
     return {"answer": og.text}
 
 
+@node("honesty_check")
+def honesty_check(state, db, run):
+    """Only runs after a human denial: an LLM check that the reply doesn't claim the action happened."""
+    try:
+        v = check_honesty(state["answer"])
+    except Exception as e:   # fail closed: if we can't verify the reply, send the safe one
+        log_event(db, run.id, "honesty_error", actor="judge", error=f"{type(e).__name__}: {e}",
+                  replaced_with=SAFE_DENIAL_REPLY)
+        return {"answer": SAFE_DENIAL_REPLY}
+    log_event(db, run.id, "honesty_check", actor="judge", **v.model_dump())
+    if v.claims_sent:
+        log_event(db, run.id, "honesty_violation", actor="judge", original_reply=state["answer"],
+                  evidence=v.evidence, replaced_with=SAFE_DENIAL_REPLY)
+        return {"answer": SAFE_DENIAL_REPLY}
+    return {}
+
+
 @node("judge")
 def judge_node(state, db, run):
-    v = judge(run.input_sanitized, state["answer"])   # online scoring of every production answer
-    run.judge, run.status = v.model_dump(), "completed"
-    log_event(db, run.id, "llm_judge", actor="judge", **run.judge)
+    run.status = "completed"
+    try:
+        v = judge(run.input_sanitized, state["answer"])   # quality score for monitoring
+        run.judge = v.model_dump()
+        log_event(db, run.id, "llm_judge", actor="judge", **run.judge)
+    except Exception as e:   # a judge outage must never cost the user their answer
+        log_event(db, run.id, "judge_error", actor="judge", error=f"{type(e).__name__}: {e}")
     log_event(db, run.id, "run_finished", status=run.status, output=run.output,
               total_input_tokens=run.total_input_tokens, total_output_tokens=run.total_output_tokens)
     return {}
@@ -183,10 +205,10 @@ def after_input(state) -> Literal["agent", "__end__"]:
     return END if state.get("answer") else "agent"
 
 
-def after_agent(state) -> Literal["tools", "request_approval", "output_guardrail"]:
+def after_agent(state) -> Literal["tools", "request_approval", "honesty_check", "output_guardrail"]:
     calls = state.get("tool_calls") or []
     if not calls:
-        return "output_guardrail"
+        return "honesty_check" if state.get("denied") else "output_guardrail"
     if state.get("steps", 0) >= settings.max_agent_steps:
         return "output_guardrail"
     if any(tc["name"] in SENSITIVE_TOOLS for tc in calls):
@@ -202,6 +224,7 @@ def build_graph(checkpointer=None):
     g.add_node("human_approval", human_approval)
     g.add_node("tools", tools)
     g.add_node("output_guardrail", output_guardrail)
+    g.add_node("honesty_check", honesty_check)
     g.add_node("judge", judge_node)
 
     g.add_edge(START, "input_guardrail")
@@ -210,6 +233,7 @@ def build_graph(checkpointer=None):
     g.add_edge("request_approval", "human_approval")
     g.add_edge("human_approval", "tools")
     g.add_edge("tools", "agent")
+    g.add_edge("honesty_check", "output_guardrail")
     g.add_edge("output_guardrail", "judge")
     g.add_edge("judge", END)
     return g.compile(checkpointer=checkpointer)
