@@ -3,3 +3,4 @@ __pycache__/
 .env
 eval_report.json
 .pytest_cache/
+checkpoints.db*

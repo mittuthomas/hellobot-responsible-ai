@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     force_offline: bool = False            # demo safety net: run on the stub LLM
 
     database_url: str = "sqlite:///./hello_agent.db"
+    checkpoint_db: str = "./checkpoints.db"           # LangGraph checkpointer (paused runs)
     otel_exporter_otlp_endpoint: str | None = None   # e.g. http://localhost:4318 (Jaeger)
     service_name: str = "hello-agent"
 

@@ -9,12 +9,34 @@ HelloBot is a deliberately simple "hello world" agent (it greets people and can 
 | 1 | **Guardrails** (input + output) | `app/guardrails.py`: blocks prompt injection, denied topics and over-long input. Redacts PII (SSN, card, **Aadhaar, PAN**, phone). Blocks system-prompt leaks. Every decision is tagged with a policy id | Pluggable `PIIDetector` interface (drop in Microsoft Presidio / cloud DLP) |
 | 2 | **Observability, explainability, auditability** | `app/telemetry.py`: distributed tracing with **GenAI semantic conventions** (`gen_ai.usage.*`, `gen_ai.request.model`). `app/audit.py`: every step goes into an append-only, **SHA-256 hash-chained** audit log, and tampering is detected. Raw input is stored only as a hash | **OpenTelemetry** → OTLP → **Jaeger** (works with Datadog / Grafana / Azure Monitor) · SQLAlchemy |
 | 3 | **Grading / evals** | `evals/dataset.yaml` golden set, run by `evals/runner.py`. Assertions plus judge, pass rate per category. CI quality gate | **pytest** · **GitHub Actions** |
-| 4 | **Human in the loop** | Side-effecting tools **pause** the run (`pending_approval`), which is persisted. A reviewer approves or denies in the dashboard or API with a note. The run resumes and the agent must report honestly | REST approval API + review queue |
+| 4 | **Human in the loop** | Side-effecting tools **pause** the graph with LangGraph `interrupt()`. Its state is checkpointed to SQLite, so a reviewer can approve or deny later, from any process, and `Command(resume=...)` continues the run. The agent must then report honestly | **LangGraph** interrupt + checkpointer · REST approval API |
 | 5 | **LLM-as-judge** | `app/judge.py`: rubric-based grading with **schema-enforced structured output** `{score, passed, reasoning}`. Runs **online** on every answer and **offline** in evals | Anthropic structured outputs |
 
-**Stack:** Python 3.12 · **Claude (Anthropic SDK)** · **FastAPI** (OpenAPI docs) · **Pydantic v2** / pydantic-settings · **SQLAlchemy 2** · **OpenTelemetry** + **Jaeger** · **Streamlit** dashboard · **pytest** · **Docker Compose** · **GitHub Actions**
+**Stack:** Python 3.12 · **LangGraph** (agent orchestration, checkpoints, interrupts) · **Claude (Anthropic SDK)** · **FastAPI** (OpenAPI docs) · **Pydantic v2** / pydantic-settings · **SQLAlchemy 2** · **OpenTelemetry** + **Jaeger** · **Streamlit** dashboard · **pytest** · **Docker Compose** · **GitHub Actions**
 
-## Architecture
+## Agent graph (LangGraph)
+
+Each control is a node in a LangGraph `StateGraph` (`app/graph.py`); each run is one LangGraph thread (`thread_id` = run id). `GET /api/graph` returns this diagram live from the compiled graph.
+
+```mermaid
+graph TD
+    START([start]) --> IG[input_guardrail]
+    IG -. blocked .-> END([end])
+    IG -. allowed .-> AG[agent · Claude]
+    AG -. sensitive tool .-> RA[request_approval]
+    RA --> HA[human_approval · interrupt]
+    HA --> T[tools]
+    AG -. safe tool .-> T
+    T --> AG
+    AG -. answer .-> OG[output_guardrail]
+    OG --> J[judge]
+    J --> END
+```
+
+- **Privacy:** raw user input never enters graph state (checkpoints are persisted). It is handed to the first node in memory, and only the sanitised text is kept.
+- **One gateway for model calls:** nodes call Claude through `app/llm.py` (the official Anthropic SDK), so OpenTelemetry spans, token accounting, the refusal fallback and offline mode work the same in every node. Each node also gets its own `node <name>` span.
+
+## System architecture
 
 ```mermaid
 flowchart LR
@@ -69,7 +91,8 @@ app/
   config.py      typed settings (pydantic-settings, .env)
   llm.py         LLM gateway: Claude call, OTel GenAI spans, refusal fallback, offline stub
   guardrails.py  input/output policies, PII redaction
-  agent.py       tool-use loop with pause/resume for human approval
+  graph.py       LangGraph state machine: nodes, routing, interrupt, SQLite checkpointer
+  agent.py       start / resume entry points (one LangGraph thread per run)
   judge.py       LLM-as-judge with structured output
   audit.py       runs + hash-chained audit events (SQLAlchemy)
   telemetry.py   OpenTelemetry setup (OTLP exporter)

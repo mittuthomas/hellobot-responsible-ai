@@ -1,4 +1,6 @@
 anthropic>=2.4.0
+langgraph>=1.2
+langgraph-checkpoint-sqlite>=3.1
 fastapi>=0.115
 uvicorn[standard]>=0.30
 pydantic>=2.7

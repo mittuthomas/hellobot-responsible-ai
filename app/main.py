@@ -110,6 +110,12 @@ def metrics():
             "guardrail_hits": policies, "input_tokens": tokens[0] or 0, "output_tokens": tokens[1] or 0}
 
 
+@app.get("/api/graph", tags=["observability"])
+def agent_graph():
+    """The LangGraph state machine as a Mermaid diagram."""
+    return {"mermaid": agent.mermaid()}
+
+
 @app.post("/api/evals", tags=["evals"])
 def run_evals():
     from evals.runner import run_suite
