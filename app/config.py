@@ -8,7 +8,8 @@ load_dotenv()   # puts provider API keys from .env (OPENAI_API_KEY, MISTRAL_API_
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # "provider:model", e.g. openai:gpt-4.1, mistralai:mistral-large-latest, anthropic:<model>, ollama:llama3.1
+    # "provider:model", e.g. openai:gpt-4.1, mistralai:mistral-large-latest, anthropic:<model>,
+    # google_genai:gemini-3.6-flash, ollama:llama3.1
     agent_model: str | None = None
     judge_model: str | None = None        # defaults to agent_model; a stronger model is better
     max_output_tokens: int = 4000

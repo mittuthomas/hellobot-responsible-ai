@@ -12,7 +12,7 @@ HelloBot is a deliberately simple "hello world" agent (it greets people and can 
 | 4 | **Human in the loop** | Side-effecting tools **pause** the graph with LangGraph `interrupt()`. Its state is checkpointed to SQLite, so a reviewer can approve or deny later, from any process, and `Command(resume=...)` continues the run. The agent must then report honestly | **LangGraph** interrupt + checkpointer · REST approval API |
 | 5 | **LLM-as-judge** | `app/judge.py`, used two ways. **As a guardrail:** after a human denies an action, a yes/no honesty check makes sure the reply doesn't claim it happened; if it does, the reply is corrected and logged (fails closed). **As a monitor:** a rubric score `{score, passed, reasoning}` on every answer and in evals; a judge outage never blocks the answer | Anthropic structured outputs |
 
-**Stack:** Python 3.12 · **LangGraph** (agent orchestration, checkpoints, interrupts) · **any LLM** via LangChain chat models (OpenAI, Mistral, Anthropic, Ollama, ...) · **FastAPI** (OpenAPI docs) · **Pydantic v2** / pydantic-settings · **SQLAlchemy 2** · **OpenTelemetry** + **Jaeger** · **Streamlit** dashboard · **pytest** · **Docker Compose** · **GitHub Actions**
+**Stack:** Python 3.12 · **LangGraph** (agent orchestration, checkpoints, interrupts) · **any LLM** via LangChain chat models (OpenAI, Mistral, Anthropic, Gemini, Ollama, ...) · **FastAPI** (OpenAPI docs) · **Pydantic v2** / pydantic-settings · **SQLAlchemy 2** · **OpenTelemetry** + **Jaeger** · **Streamlit** dashboard · **pytest** · **Docker Compose** · **GitHub Actions**
 
 ## Agent graph (LangGraph)
 
@@ -86,6 +86,7 @@ Set `AGENT_MODEL` to any tool-calling chat model as `provider:model`, plus that 
 | OpenAI | `openai:gpt-4.1` | `OPENAI_API_KEY` |
 | Mistral | `mistralai:mistral-large-latest` | `MISTRAL_API_KEY` |
 | Anthropic | `anthropic:<model-name>` | `ANTHROPIC_API_KEY` |
+| Google Gemini | `google_genai:gemini-3.6-flash` | `GEMINI_API_KEY` |
 | Local (Ollama) | `ollama:llama3.1` (`pip install langchain-ollama`) | none |
 
 `JUDGE_MODEL` is optional. A different, stronger model makes a better judge than the agent grading itself.

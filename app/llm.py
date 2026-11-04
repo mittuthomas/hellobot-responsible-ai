@@ -2,7 +2,8 @@
 refusal handling live in one place, whatever the provider.
 
 Models are chosen by a "provider:model" string, for example
-    openai:gpt-4.1   mistralai:mistral-large-latest   anthropic:<model>   ollama:llama3.1
+    openai:gpt-4.1   mistralai:mistral-large-latest   anthropic:<model>
+    google_genai:gemini-3.6-flash   ollama:llama3.1
 and created with LangChain's standard chat-model interface (init_chat_model), so the
 same code drives any provider that supports tool calling. Each provider reads its own
 API key from the environment (OPENAI_API_KEY, MISTRAL_API_KEY, ...).
@@ -23,6 +24,10 @@ from app.config import settings
 from app.telemetry import tracer
 
 T = TypeVar("T", bound=BaseModel)
+
+# Finish reasons meaning the provider withheld the answer (lowercase; Gemini reports uppercase).
+_REFUSAL_FINISH_REASONS = {"refusal", "content_filter", "safety", "recitation", "blocklist",
+                           "prohibited_content", "spii", "image_safety"}
 
 
 @dataclass
@@ -79,7 +84,7 @@ def _real_chat(model, system, messages, tools) -> LLMResponse:
     finish = str(meta.get("finish_reason") or meta.get("stop_reason") or "")
     usage = msg.usage_metadata or {}
     stop = ("tool_use" if msg.tool_calls else
-            "refusal" if finish in ("refusal", "content_filter") else "end_turn")
+            "refusal" if finish.lower() in _REFUSAL_FINISH_REASONS else "end_turn")
     return LLMResponse(
         text=msg.text, stop_reason=stop, message=msg,
         tool_calls=[{"id": tc["id"], "name": tc["name"], "input": tc["args"]} for tc in msg.tool_calls],
