@@ -11,12 +11,13 @@
 Human in the loop uses LangGraph's native interrupt(): the graph pauses inside
 `human_approval`, its state is checkpointed to SQLite (thread_id = run id), and a
 reviewer's decision resumes it later with Command(resume=...), from any process.
-Model calls go through app.llm (official Anthropic SDK, OTel spans, offline stub).
+Model calls go through app.llm (any provider via LangChain chat models, OTel spans, offline stub).
 """
 import functools
 import sqlite3
 from typing import Literal, TypedDict
 
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -37,7 +38,6 @@ TOOLS = [{
     "description": "Send a short greeting message to an email address.",
     "input_schema": {"type": "object", "additionalProperties": False, "required": ["to", "message"],
                      "properties": {"to": {"type": "string"}, "message": {"type": "string"}}},
-    "strict": True,
 }]
 SENSITIVE_TOOLS = {"send_greeting"}   # side effects -> require human approval
 
@@ -48,7 +48,7 @@ def send_greeting(to: str, message: str) -> str:
 
 class AgentState(TypedDict, total=False):
     run_id: str
-    messages: list              # Anthropic-format conversation (sanitised input only)
+    messages: list              # LangChain messages, provider-neutral (sanitised input only)
     tool_calls: list            # tool calls from the latest model turn
     decision: dict              # the human reviewer's decision
     answer: str                 # draft answer before the output guardrail
@@ -97,12 +97,12 @@ def input_guardrail(state, db, run):
         run.status, run.output = "blocked", "Sorry, I can't help with that request."
         log_event(db, run.id, "run_finished", status=run.status, output=run.output)
         return {"answer": run.output}
-    return {"messages": [{"role": "user", "content": g.text}], "steps": 0}
+    return {"messages": [HumanMessage(g.text)], "steps": 0}
 
 
 @node("agent")
 def agent(state, db, run):
-    r = llm.call(model=settings.agent_model, system=SYSTEM, messages=state["messages"], tools=TOOLS)
+    r = llm.chat(model=settings.agent_model, system=SYSTEM, messages=state["messages"], tools=TOOLS)
     run.total_input_tokens += r.input_tokens
     run.total_output_tokens += r.output_tokens
     log_event(db, run.id, "llm_call", model=r.model, stop_reason=r.stop_reason,
@@ -112,7 +112,7 @@ def agent(state, db, run):
     if r.stop_reason == "refusal":
         return {"answer": "Sorry, I can't help with that request.", "tool_calls": [], "steps": steps}
     if r.stop_reason == "tool_use":
-        return {"messages": [*state["messages"], {"role": "assistant", "content": r.content}],
+        return {"messages": [*state["messages"], r.message],
                 "tool_calls": r.tool_calls, "steps": steps}
     return {"answer": r.text, "tool_calls": [], "steps": steps}
 
@@ -149,13 +149,13 @@ def tools(state, db, run):
         if approved:
             with tracer.start_as_current_span(f"execute_tool {tc['name']}"):
                 out = send_greeting(**tc["input"])
-            results.append({"type": "tool_result", "tool_use_id": tc["id"], "content": out})
+            results.append(ToolMessage(out, tool_call_id=tc["id"]))
         else:
             d = state.get("decision", {})
             out = f"Declined by human reviewer {d.get('approver', '')}. {d.get('note', '')}".strip()
-            results.append({"type": "tool_result", "tool_use_id": tc["id"], "content": out, "is_error": True})
+            results.append(ToolMessage(out, tool_call_id=tc["id"], status="error"))
         log_event(db, run.id, "tool_result", actor="tool", tool=tc["name"], result=out)
-    return {"messages": [*state["messages"], {"role": "user", "content": results}],
+    return {"messages": [*state["messages"], *results],
             "tool_calls": [], "decision": {}, "denied": state.get("denied", False) or not approved}
 
 

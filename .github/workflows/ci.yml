@@ -4,6 +4,10 @@ jobs:
   test-and-eval:
     runs-on: ubuntu-latest
     env:
+      # Live evals run when these repository settings are present (any provider)
+      AGENT_MODEL: ${{ vars.AGENT_MODEL }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v4
@@ -12,6 +16,6 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Unit + API tests and eval quality gate (offline)
         run: pytest -q
-      - name: Live evals against Claude
-        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+      - name: Live evals against the configured LLM
+        if: ${{ env.AGENT_MODEL != '' }}
         run: python -m evals.runner

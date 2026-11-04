@@ -1,6 +1,6 @@
 # 🤖 HelloBot: a responsible AI agent reference implementation
 
-**Live demo (claude.ai, no setup):** https://claude.ai/artifact/X3esmAzgcv8QsJgM13dtjt (source: `artifact/hellobot.html`)
+**Live demo (browser, no setup):** https://claude.ai/artifact/X3esmAzgcv8QsJgM13dtjt (source: `artifact/hellobot.html`). The demo page runs on its hosting platform's built-in model; the Python app below works with any provider.
 
 HelloBot is a deliberately simple "hello world" agent (it greets people and can send a greeting by email). The agent stays tiny on purpose, so the focus is the **enterprise controls around it**:
 
@@ -12,7 +12,7 @@ HelloBot is a deliberately simple "hello world" agent (it greets people and can 
 | 4 | **Human in the loop** | Side-effecting tools **pause** the graph with LangGraph `interrupt()`. Its state is checkpointed to SQLite, so a reviewer can approve or deny later, from any process, and `Command(resume=...)` continues the run. The agent must then report honestly | **LangGraph** interrupt + checkpointer · REST approval API |
 | 5 | **LLM-as-judge** | `app/judge.py`, used two ways. **As a guardrail:** after a human denies an action, a yes/no honesty check makes sure the reply doesn't claim it happened; if it does, the reply is corrected and logged (fails closed). **As a monitor:** a rubric score `{score, passed, reasoning}` on every answer and in evals; a judge outage never blocks the answer | Anthropic structured outputs |
 
-**Stack:** Python 3.12 · **LangGraph** (agent orchestration, checkpoints, interrupts) · **Claude (Anthropic SDK)** · **FastAPI** (OpenAPI docs) · **Pydantic v2** / pydantic-settings · **SQLAlchemy 2** · **OpenTelemetry** + **Jaeger** · **Streamlit** dashboard · **pytest** · **Docker Compose** · **GitHub Actions**
+**Stack:** Python 3.12 · **LangGraph** (agent orchestration, checkpoints, interrupts) · **any LLM** via LangChain chat models (OpenAI, Mistral, Anthropic, Ollama, ...) · **FastAPI** (OpenAPI docs) · **Pydantic v2** / pydantic-settings · **SQLAlchemy 2** · **OpenTelemetry** + **Jaeger** · **Streamlit** dashboard · **pytest** · **Docker Compose** · **GitHub Actions**
 
 ## Agent graph (LangGraph)
 
@@ -22,7 +22,7 @@ Each control is a node in a LangGraph `StateGraph` (`app/graph.py`); each run is
 graph TD
     START([start]) --> IG[input_guardrail]
     IG -. blocked .-> END([end])
-    IG -. allowed .-> AG[agent · Claude]
+    IG -. allowed .-> AG[agent · LLM]
     AG -. sensitive tool .-> RA[request_approval]
     RA --> HA[human_approval · interrupt]
     HA --> T[tools]
@@ -36,7 +36,7 @@ graph TD
 ```
 
 - **Privacy:** raw user input never enters graph state (checkpoints are persisted). It is handed to the first node in memory, and only the sanitised text is kept.
-- **One gateway for model calls:** nodes call Claude through `app/llm.py` (the official Anthropic SDK), so OpenTelemetry spans, token accounting, the refusal fallback and offline mode work the same in every node. Each node also gets its own `node <name>` span.
+- **One gateway for model calls, any provider:** nodes call the model through `app/llm.py`, which builds it from a `provider:model` string with LangChain's standard chat-model interface. OpenTelemetry spans, token accounting, refusal handling and offline mode work the same for every provider. Judges return Pydantic-validated JSON using a prompt-based method that works on any chat model. Each node also gets its own `node <name>` span.
 
 ## System architecture
 
@@ -46,7 +46,7 @@ flowchart LR
     UI -->|REST| API[FastAPI]
     API --> IG[🛡️ Input guardrails]
     IG -->|blocked| AUD
-    IG --> AG[🧠 Agent loop · Claude]
+    IG --> AG[🧠 Agent loop · LLM]
     AG -->|sensitive tool| HITL[🧑‍⚖️ Approval queue]
     HITL -->|approve / deny| AG
     AG --> OG[🛡️ Output guardrails]
@@ -59,7 +59,7 @@ flowchart LR
 ## Quick start
 
 ```bash
-cp .env.example .env            # add ANTHROPIC_API_KEY (or leave empty for offline mode)
+cp .env.example .env            # set AGENT_MODEL and that provider's API key (or leave empty for offline mode)
 docker compose up --build
 ```
 - Dashboard: http://localhost:8501
@@ -75,7 +75,20 @@ make test     # unit + API tests + eval quality gate
 make evals    # eval report -> eval_report.json
 ```
 
-> **Offline mode:** with no API key (or `FORCE_OFFLINE=true`), a deterministic stub stands in for Claude, so the whole demo works without network access. Add the key to switch to live Claude (`claude-opus-5-5`).
+> **Offline mode:** with no `AGENT_MODEL` set (or `FORCE_OFFLINE=true`), a deterministic stub stands in for the LLM, so the whole demo works without network access.
+
+### Choosing a model
+
+Set `AGENT_MODEL` to any tool-calling chat model as `provider:model`, plus that provider's API key:
+
+| Provider | `AGENT_MODEL` example | Key |
+|---|---|---|
+| OpenAI | `openai:gpt-4.1` | `OPENAI_API_KEY` |
+| Mistral | `mistralai:mistral-large-latest` | `MISTRAL_API_KEY` |
+| Anthropic | `anthropic:<model-name>` | `ANTHROPIC_API_KEY` |
+| Local (Ollama) | `ollama:llama3.1` (`pip install langchain-ollama`) | none |
+
+`JUDGE_MODEL` is optional. A different, stronger model makes a better judge than the agent grading itself.
 
 ## 5-minute demo script
 
@@ -91,7 +104,7 @@ make evals    # eval report -> eval_report.json
 ```
 app/
   config.py      typed settings (pydantic-settings, .env)
-  llm.py         LLM gateway: Claude call, OTel GenAI spans, refusal fallback, offline stub
+  llm.py         LLM gateway: any provider via LangChain, OTel GenAI spans, JSON outputs, offline stub
   guardrails.py  input/output policies, PII redaction
   graph.py       LangGraph state machine: nodes, routing, interrupt, SQLite checkpointer
   agent.py       start / resume entry points (one LangGraph thread per run)

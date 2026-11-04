@@ -34,7 +34,7 @@ except Exception:
 with st.sidebar:
     st.title("🤖 HelloBot")
     st.caption("Responsible AI agent reference implementation")
-    st.metric("Mode", "Live · Claude" if health["mode"] == "live" else "Offline stub")
+    st.metric("Mode", "Live LLM" if health["mode"] == "live" else "Offline stub")
     st.write(f"**Agent model:** `{health['agent_model']}`")
     st.write(f"**Judge model:** `{health['judge_model']}`")
     st.divider()

@@ -214,7 +214,7 @@ footer { color: var(--muted); font-size: 0.82rem; }
   <section id="view-chat" class="grid2">
     <section class="pipeline" aria-label="Controls for the latest message">
       <div class="stage" id="st-input"><span class="num">01</span><span class="name">Input guardrails</span><span class="state">Waiting</span></div>
-      <div class="stage" id="st-agent"><span class="num">02</span><span class="name">Agent · Claude</span><span class="state">Waiting</span></div>
+      <div class="stage" id="st-agent"><span class="num">02</span><span class="name">Agent · LLM</span><span class="state">Waiting</span></div>
       <div class="stage" id="st-human"><span class="num">03</span><span class="name">Human in the loop</span><span class="state">Waiting</span></div>
       <div class="stage" id="st-output"><span class="num">04</span><span class="name">Output guardrails</span><span class="state">Waiting</span></div>
       <div class="stage" id="st-judge"><span class="num">05</span><span class="name">LLM judge</span><span class="state">Waiting</span></div>
@@ -287,7 +287,7 @@ footer { color: var(--muted); font-size: 0.82rem; }
     </div>
   </section>
 
-  <footer>Reference implementation: Python · LangGraph · FastAPI · OpenTelemetry · SQLAlchemy · pytest · Docker. This page is the same pipeline in the browser, with Claude answering through the viewer's own Claude account.</footer>
+  <footer>Reference implementation: Python · LangGraph · FastAPI · OpenTelemetry · SQLAlchemy · pytest · Docker. This page is the same pipeline in the browser, using the hosting platform's built-in model through the viewer's own account. The Python app works with any LLM provider.</footer>
 </div>
 
 <script>
@@ -498,7 +498,7 @@ async function startRun(rawInput, { ephemeral = false, context = [] } = {}) {
   context = context.slice(-MAX_CONTEXT_TURNS);
   const run = { id: newId(), createdAt: Date.now(), updatedAt: Date.now(), status: "running",
     inputHash: await sha256(rawInput), input: g.text, context, events: [], pending: null, output: null, judge: null,
-    ephemeral, model: offline ? "offline-stub" : "claude (quick tier)", by: myId };
+    ephemeral, model: offline ? "offline-stub" : "hosted LLM (quick tier)", by: myId };
   if (!ephemeral) live = run;
   stage(run, "input", "active", "Checking…");
   await logEvent(run, "run_started", "user", { input_sha256: run.inputHash, sanitized_input: g.text, context_turns: context.length, context });
@@ -604,7 +604,7 @@ async function finishRun(run, answer) {
 }
 async function failRun(run, e) {
   stage(run, "agent", "bad", errorCopy(e));
-  run.status = "completed"; run.output = "Sorry, I couldn't reach Claude just now. " + errorCopy(e);
+  run.status = "completed"; run.output = "Sorry, I couldn't reach the model just now. " + errorCopy(e);
   await logEvent(run, "error", "agent", { code: e && e.code, message: e && e.message, llm: e && e.call });
   await logEvent(run, "run_finished", "agent", { status: run.status, output: run.output });
   return run;
@@ -616,11 +616,11 @@ async function judge(input, answer, expected = "", trace = {}) {
 }
 function errorCopy(e) {
   const c = e && e.code;
-  if (c === "not_granted") return "Claude access was not allowed for this page.";
+  if (c === "not_granted") return "Model access was not allowed for this page.";
   if (c === "rate_limited") return "Too many requests right now; wait a moment and try again.";
   if (c === "cancelled") return "Stopped.";
-  if (e instanceof SyntaxError) return "Claude's answer was not valid JSON.";
-  return "Something went wrong talking to Claude.";
+  if (e instanceof SyntaxError) return "The model's answer was not valid JSON.";
+  return "Something went wrong talking to the model.";
 }
 
 /* pipeline strip */
@@ -660,7 +660,7 @@ function assertCase(c, run) {
 async function runEvals() {
   evalStop = false;
   $("#runEvals").disabled = true; $("#stopEvals").hidden = false;
-  evalReport = { results: CASES.map((c) => ({ c, state: "queued" })), done: false, model: offline ? "offline-stub" : "claude (quick tier)" };
+  evalReport = { results: CASES.map((c) => ({ c, state: "queued" })), done: false, model: offline ? "offline-stub" : "hosted LLM (quick tier)" };
   renderEvals();
   for (const r of evalReport.results) {
     if (evalStop) { r.state = "skipped"; continue; }
@@ -728,8 +728,8 @@ function llmSections(key, call) {
   const chars = (t) => `${(t || "").length.toLocaleString()} chars`;
   return [
     el("div", { class: "llm-meta mono muted", text: `model tier ${call.tier} · ${call.latency_ms.toLocaleString()} ms` }),
-    keptDetails(key + ":in", `Input sent to Claude (${chars(call.prompt)})`, el("pre", { class: "llm", text: call.prompt })),
-    keptDetails(key + ":out", `Full output from Claude (${chars(call.output)})`, el("pre", { class: "llm", text: call.output || "(empty)" })),
+    keptDetails(key + ":in", `Input sent to the LLM (${chars(call.prompt)})`, el("pre", { class: "llm", text: call.prompt })),
+    keptDetails(key + ":out", `Full output from the LLM (${chars(call.output)})`, el("pre", { class: "llm", text: call.output || "(empty)" })),
   ];
 }
 function renderTimeline(container, run, brokenAt = -1) {
@@ -916,7 +916,7 @@ function renderEvals() {
     statTile("Pass rate", rate == null ? "–" : Math.round(rate * 100) + "%", rate == null ? "Threshold 80%" : rate >= 0.8 ? "Above the 80% gate" : "Below the 80% gate"),
     statTile("Cases", `${passed}/${CASES.length}`, done.length < CASES.length && evalReport && !evalReport.done ? `Running ${done.length + 1} of ${CASES.length}` : "passed"),
     statTile("Avg judge score", scores.length ? (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1) + "/5" : "–"),
-    statTile("Model", evalReport ? evalReport.model : (offline ? "offline-stub" : "claude"), "Agent and judge"));
+    statTile("Model", evalReport ? evalReport.model : (offline ? "offline-stub" : "hosted LLM"), "Agent and judge"));
   for (const r of res) {
     const icon = r.state === "done" ? (r.passed ? "✓" : "✗") : r.state === "running" ? "…" : r.state === "error" ? "!" : "·";
     const tone = r.state === "done" ? (r.passed ? "ok" : "bad") : r.state === "error" ? "bad" : "";
@@ -985,9 +985,9 @@ window.addEventListener("hashchange", showTab);
 function renderMode() {
   const m = $("#mode");
   m.replaceChildren(
-    offline ? el("span", { class: "pill warn" }, el("span", { class: "dot" }), "Offline stub model") : el("span", { class: "pill ok" }, el("span", { class: "dot" }), "Live · Claude"),
+    offline ? el("span", { class: "pill warn" }, el("span", { class: "dot" }), "Offline stub model") : el("span", { class: "pill ok" }, el("span", { class: "dot" }), "Live LLM"),
     storeMode === "shared" ? el("span", { class: "pill info" }, el("span", { class: "dot" }), "Shared audit log") : el("span", { class: "pill" }, el("span", { class: "dot" }), "Audit log in this browser"));
-  $("#chatHint").textContent = offline ? "Claude isn't available in this view, so a scripted stand-in answers." : "";
+  $("#chatHint").textContent = offline ? "The model isn't available in this view, so a scripted stand-in answers." : "";
 }
 
 /* boot */

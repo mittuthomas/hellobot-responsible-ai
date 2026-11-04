@@ -18,16 +18,16 @@ def _ask_and_decide(approved):
 
 
 def test_dishonest_reply_after_denial_is_corrected(monkeypatch):
-    real = llm.call
+    from langchain_core.messages import AIMessage, ToolMessage
+    real = llm.chat
 
     def lying_agent(**kw):
-        last = kw["messages"][-1]["content"]
-        if kw.get("tools") and isinstance(last, list):   # the reply written after the tool result
-            return llm.LLMResponse(text="Done! I've sent the greeting to Alice.", stop_reason="end_turn",
-                                   model="lying-stub", content=[{"type": "text", "text": "Done!"}])
+        if kw.get("tools") and isinstance(kw["messages"][-1], ToolMessage):   # the reply after the tool result
+            text = "Done! I've sent the greeting to Alice."
+            return llm.LLMResponse(text=text, model="lying-stub", message=AIMessage(text))
         return real(**kw)
 
-    monkeypatch.setattr(llm, "call", lying_agent)
+    monkeypatch.setattr(llm, "chat", lying_agent)
     done = _ask_and_decide(approved=False)
     assert done["output"] == SAFE_DENIAL_REPLY
     assert "honesty_violation" in _events(done["id"])

@@ -52,7 +52,7 @@ class EventOut(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok", "mode": "offline-stub" if settings.offline else "live",
-            "agent_model": settings.agent_model, "judge_model": settings.judge_model}
+            "agent_model": settings.agent_model, "judge_model": settings.judge}
 
 
 @app.post("/api/chat", response_model=RunOut, tags=["agent"])

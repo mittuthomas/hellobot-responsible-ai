@@ -1,15 +1,18 @@
 """Typed, env-driven configuration (12-factor). Override any field with an env var or .env."""
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+load_dotenv()   # puts provider API keys from .env (OPENAI_API_KEY, MISTRAL_API_KEY, ...) into the environment
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    anthropic_api_key: str | None = None
-    agent_model: str = "claude-opus-5-5"
-    judge_model: str = "claude-opus-5-5"
-    effort: str = "low"
-    force_offline: bool = False            # demo safety net: run on the stub LLM
+    # "provider:model", e.g. openai:gpt-4.1, mistralai:mistral-large-latest, anthropic:<model>, ollama:llama3.1
+    agent_model: str | None = None
+    judge_model: str | None = None        # defaults to agent_model; a stronger model is better
+    max_output_tokens: int = 4000
+    force_offline: bool = False           # demo safety net: run on the stub LLM
 
     database_url: str = "sqlite:///./hello_agent.db"
     checkpoint_db: str = "./checkpoints.db"           # LangGraph checkpointer (paused runs)
@@ -22,7 +25,11 @@ class Settings(BaseSettings):
 
     @property
     def offline(self) -> bool:
-        return self.force_offline or not self.anthropic_api_key
+        return self.force_offline or not self.agent_model
+
+    @property
+    def judge(self) -> str | None:
+        return self.judge_model or self.agent_model
 
 
 settings = Settings()
