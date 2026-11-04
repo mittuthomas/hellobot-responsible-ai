@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     checkpoint_db: str = "./checkpoints.db"           # LangGraph checkpointer (paused runs)
     otel_exporter_otlp_endpoint: str | None = None   # e.g. http://localhost:4318 (Jaeger)
     service_name: str = "hello-agent"
+    otel_capture_llm_content: bool = True            # put full LLM requests/responses on trace spans
 
     max_input_chars: int = 2000
     max_agent_steps: int = 4

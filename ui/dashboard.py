@@ -60,6 +60,51 @@ def show_run(run):
         st.caption(f"⚖️ Judge: {run['judge']['reasoning']}")
 
 
+def fmt_ms(ms):
+    return "–" if ms is None else f"{ms:.0f} ms" if ms < 1000 else f"{ms / 1000:.1f} s"
+
+
+def fmt_bytes(n):
+    return "–" if n is None else f"{n} B" if n < 1024 else f"{n / 1024:.1f} KB"
+
+
+def llm_call_title(c):
+    """One line per call. Events from before this was recorded have fewer fields."""
+    tokens = c.get("total_tokens", (c.get("input_tokens") or 0) + (c.get("output_tokens") or 0))
+    return (f"{'❌' if c.get('status') == 'error' else '🧠'} {c.get('purpose', 'agent')} · `{c.get('model', '–')}` · "
+            f"{fmt_ms(c.get('duration_ms'))} · {tokens} tokens · "
+            f"↑ {fmt_bytes(c.get('request_bytes'))} ↓ {fmt_bytes(c.get('response_bytes'))}")
+
+
+def show_llm_summary(run_id):
+    """Totals and a per-call table for one run. Returns the calls."""
+    data = get(f"/api/runs/{run_id}/llm-calls")
+    s, calls = data["summary"], data["calls"]
+    if not calls:
+        st.caption("No LLM calls in this run.")
+        return calls
+    c = st.columns(4)
+    c[0].metric("LLM calls", s["calls"], f"{s['errors']} failed" if s["errors"] else None, delta_color="inverse")
+    c[1].metric("LLM time", fmt_ms(s["duration_ms"]))
+    c[2].metric("Tokens (in / out)", f"{s['input_tokens']} / {s['output_tokens']}")
+    c[3].metric("Sent / received", f"{fmt_bytes(s['request_bytes'])} / {fmt_bytes(s['response_bytes'])}")
+    st.dataframe(pd.DataFrame([{
+        "#": i, "purpose": x.get("purpose", "agent"), "model": x.get("model"), "status": x.get("status", "ok"),
+        "started (UTC)": (x.get("started_at") or "")[11:23], "time": fmt_ms(x.get("duration_ms")),
+        "tokens in": x.get("input_tokens"), "tokens out": x.get("output_tokens"), "total": x.get("total_tokens"),
+        "request": fmt_bytes(x.get("request_bytes")), "response": fmt_bytes(x.get("response_bytes")),
+        "stop reason": x.get("stop_reason"),
+    } for i, x in enumerate(calls, 1)]), use_container_width=True, hide_index=True)
+    return calls
+
+
+def show_llm_call_details(c):
+    """Metadata open, with the full request and response collapsed until clicked."""
+    if c.get("error"):
+        st.error(c["error"])
+    st.json(c, expanded=1)
+
+
 # ----------------------------------------------------------------- chat
 with tab_chat:
     st.subheader("Talk to HelloBot")
@@ -87,6 +132,10 @@ with tab_chat:
                 out = run["output"]
                 (st.error if run["status"] == "blocked" else st.write)(out)
             show_run(run)
+            st.markdown("**LLM calls**")
+            for call in show_llm_summary(run["id"]):
+                with st.expander(llm_call_title(call)):
+                    show_llm_call_details(call)
         st.session_state.history.append({"input": prompt, "output": out})
 
 # ----------------------------------------------------------------- HITL
@@ -136,9 +185,18 @@ with tab_audit:
         icons = {"run_started": "▶️", "input_guardrail": "🛡️", "llm_call": "🧠", "approval_requested": "⏸️",
                  "human_decision": "🧑‍⚖️", "tool_result": "🛠️", "output_guardrail": "🛡️",
                  "llm_judge": "⚖️", "run_finished": "🏁"}
+        st.markdown("**LLM calls**")
+        show_llm_summary(rid)
+        st.markdown("**Timeline**")
         for e in get(f"/api/runs/{rid}/events"):
-            with st.expander(f"{icons.get(e['event'], '•')} {e['ts'][11:19]} · **{e['event']}** · by `{e['actor']}`"):
-                st.json(e["data"])
+            is_llm = e["event"] == "llm_call"
+            title = (f"{e['ts'][11:19]} · {llm_call_title(e['data'])}" if is_llm else
+                     f"{icons.get(e['event'], '•')} {e['ts'][11:19]} · **{e['event']}**")
+            with st.expander(f"{title} · by `{e['actor']}`"):
+                if is_llm:
+                    show_llm_call_details(e["data"])
+                else:
+                    st.json(e["data"])
                 st.caption(f"hash {e['hash'][:16]}… ← prev {e['prev_hash'][:16]}…")
     else:
         st.info("No runs yet — say hi in the Chat tab.")
@@ -177,6 +235,11 @@ with tab_metrics:
     c[1].metric("Avg judge score", m["avg_judge_score"] or "–")
     c[2].metric("Judge pass rate", f"{m['judge_pass_rate']:.0%}" if m["judge_pass_rate"] is not None else "–")
     c[3].metric("Tokens used", m["input_tokens"] + m["output_tokens"])
+    c = st.columns(4)
+    c[0].metric("LLM calls", m["llm"]["calls"])
+    c[1].metric("LLM errors", m["llm"]["errors"])
+    c[2].metric("Avg LLM time", fmt_ms(m["llm"]["avg_duration_ms"]))
+    c[3].metric("LLM data sent / received", f"{fmt_bytes(m['llm']['request_bytes'])} / {fmt_bytes(m['llm']['response_bytes'])}")
     l, r = st.columns(2)
     with l:
         st.markdown("**Runs by status**")

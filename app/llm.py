@@ -10,10 +10,19 @@ API key from the environment (OPENAI_API_KEY, MISTRAL_API_KEY, ...).
 
 With no model configured (or FORCE_OFFLINE=true) a deterministic stub answers instead,
 so demos and CI never depend on network access.
+
+chat() also measures every call (time, tokens, sizes, full request and response). The
+OTel span always gets this; the audit log gets it through a recorder set by record_calls().
 """
 import json
 import re
+import time
+import uuid
+from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, TypeVar
 
@@ -39,6 +48,7 @@ class LLMResponse:
     input_tokens: int = 0
     output_tokens: int = 0
     message: Any = None   # the provider's AIMessage, appended to the conversation as-is
+    usage: dict = field(default_factory=dict)              # the provider's full token breakdown
 
 
 @lru_cache(maxsize=8)
@@ -57,6 +67,82 @@ def _tool_spec(t: dict) -> dict:
             "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
 
 
+# ------------------------------------------------------------------ per-call record
+_recorder: ContextVar[Callable[[dict], None] | None] = ContextVar("llm_recorder", default=None)
+
+
+@contextmanager
+def record_calls(recorder: Callable[[dict], None]):
+    """Send a record of every chat() call in this block, failed ones included, to `recorder`."""
+    token = _recorder.set(recorder)
+    try:
+        yield
+    finally:
+        _recorder.reset(token)
+
+
+def _compact(payload: Any) -> str:
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, default=str)
+
+
+def _message_dump(m: BaseMessage) -> dict:
+    d = {"role": m.type, "content": m.content}
+    for key in ("tool_calls", "tool_call_id", "status"):
+        if value := getattr(m, key, None):
+            d[key] = value
+    return d
+
+
+def _request_payload(system: str, messages: list[BaseMessage], tools) -> dict:
+    """What we hand to the model: provider-neutral, and never includes credentials."""
+    return {"system": system, "messages": [_message_dump(m) for m in messages],
+            "tools": [_tool_spec(t) for t in tools or []],
+            "params": {"max_tokens": settings.max_output_tokens}}
+
+
+def _response_payload(r: LLMResponse) -> dict:
+    msg = r.message
+    return {"text": r.text, "tool_calls": r.tool_calls, "stop_reason": r.stop_reason,
+            "content": getattr(msg, "content", None),
+            "response_metadata": getattr(msg, "response_metadata", None) or {},
+            "usage": r.usage}
+
+
+def _record_call(span, *, model, purpose, started_at, started, request, r: LLMResponse | None = None,
+                 error: Exception | None = None) -> None:
+    duration_ms = round((time.perf_counter() - started) * 1000, 1)
+    response = _response_payload(r) if r else None
+    request_json, response_json = _compact(request), _compact(response) if r else ""
+    usage = r.usage if r else {}
+    ctx = span.get_span_context()
+
+    span.set_attribute("app.llm.duration_ms", duration_ms)
+    span.set_attribute("app.llm.request_bytes", len(request_json.encode()))
+    span.set_attribute("app.llm.response_bytes", len(response_json.encode()))
+    if settings.otel_capture_llm_content:
+        span.set_attribute("gen_ai.input.messages", request_json)
+        if r:
+            span.set_attribute("gen_ai.output.messages", response_json)
+
+    if recorder := _recorder.get():
+        input_tokens, output_tokens = (r.input_tokens, r.output_tokens) if r else (0, 0)
+        recorder({
+            "call_id": uuid.uuid4().hex[:12], "purpose": purpose, "provider": _provider(model),
+            "model_requested": model or "offline-stub", "model": r.model if r else model or "offline-stub",
+            "status": "error" if error else "ok", "error": f"{type(error).__name__}: {error}" if error else None,
+            "stop_reason": r.stop_reason if r else None,
+            "started_at": started_at.isoformat(timespec="milliseconds"), "duration_ms": duration_ms,
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "total_tokens": usage.get("total_tokens", input_tokens + output_tokens),
+            "reasoning_tokens": usage.get("output_token_details", {}).get("reasoning", 0),
+            "cached_input_tokens": usage.get("input_token_details", {}).get("cache_read", 0),
+            "request_bytes": len(request_json.encode()), "response_bytes": len(response_json.encode()),
+            "message_count": len(request["messages"]), "tool_call_count": len(r.tool_calls) if r else 0,
+            "otel_trace_id": format(ctx.trace_id, "032x"), "otel_span_id": format(ctx.span_id, "016x"),
+            "request": request, "response": response,
+        })
+
+
 def chat(*, model: str | None, system: str, messages: list[BaseMessage], tools=None,
          purpose: str = "agent") -> LLMResponse:
     with tracer.start_as_current_span(f"chat {model or 'offline-stub'}") as span:
@@ -66,12 +152,20 @@ def chat(*, model: str | None, system: str, messages: list[BaseMessage], tools=N
         span.set_attribute("app.llm.purpose", purpose)
         span.set_attribute("app.llm.offline", settings.offline)
 
-        r = _stub_chat(messages, tools) if settings.offline else _real_chat(model, system, messages, tools)
+        call = {"model": model, "purpose": purpose, "started_at": datetime.now(timezone.utc),
+                "started": time.perf_counter(), "request": _request_payload(system, messages, tools)}
+        try:
+            r = _stub_chat(messages, tools) if settings.offline else _real_chat(model, system, messages, tools)
+        except Exception as e:   # record the failed call, then let the caller decide what it means
+            span.set_attribute("error.type", type(e).__name__)
+            _record_call(span, **call, error=e)
+            raise
 
         span.set_attribute("gen_ai.response.model", r.model)
         span.set_attribute("gen_ai.response.finish_reasons", [r.stop_reason])
         span.set_attribute("gen_ai.usage.input_tokens", r.input_tokens)
         span.set_attribute("gen_ai.usage.output_tokens", r.output_tokens)
+        _record_call(span, **call, r=r)
         return r
 
 
@@ -89,7 +183,7 @@ def _real_chat(model, system, messages, tools) -> LLMResponse:
         text=msg.text, stop_reason=stop, message=msg,
         tool_calls=[{"id": tc["id"], "name": tc["name"], "input": tc["args"]} for tc in msg.tool_calls],
         model=str(meta.get("model_name") or meta.get("model") or model),
-        input_tokens=usage.get("input_tokens", 0), output_tokens=usage.get("output_tokens", 0),
+        input_tokens=usage.get("input_tokens", 0), output_tokens=usage.get("output_tokens", 0), usage=dict(usage),
     )
 
 

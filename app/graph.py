@@ -15,6 +15,7 @@ Model calls go through app.llm (any provider via LangChain chat models, OTel spa
 """
 import functools
 import sqlite3
+import time
 from typing import Literal, TypedDict
 
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -23,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from app import llm
-from app.audit import Run, SessionLocal, log_event
+from app.audit import Run, SessionLocal, llm_calls, log_event, summarize_llm_calls
 from app.config import settings
 from app.guardrails import check_input, check_output
 from app.judge import SAFE_DENIAL_REPLY, check_honesty, judge
@@ -66,6 +67,18 @@ def stash_raw_input(run_id: str, text: str):
 
 
 # ------------------------------------------------------------------ helpers
+JUDGE_PURPOSES = {"judge", "honesty_check"}
+
+
+def _audit_llm_call(db, run):
+    """Log every model call, whichever node made it, and count its tokens towards the run."""
+    def record(call: dict):
+        run.total_input_tokens += call["input_tokens"]
+        run.total_output_tokens += call["output_tokens"]
+        log_event(db, run.id, "llm_call", actor="judge" if call["purpose"] in JUDGE_PURPOSES else "agent", **call)
+    return record
+
+
 def node(name):
     """Wrap a node: one OTel span per node, and a DB session + Run row for the audit log."""
     def deco(fn):
@@ -77,7 +90,8 @@ def node(name):
                 tid = current_trace_id()
                 if tid and tid not in run.otel_trace_ids:
                     run.otel_trace_ids = [*run.otel_trace_ids, tid]
-                update = fn(state, db, run)
+                with llm.record_calls(_audit_llm_call(db, run)):
+                    update = fn(state, db, run)
                 db.commit()
                 return update
         return wrapper
@@ -103,11 +117,6 @@ def input_guardrail(state, db, run):
 @node("agent")
 def agent(state, db, run):
     r = llm.chat(model=settings.agent_model, system=SYSTEM, messages=state["messages"], tools=TOOLS)
-    run.total_input_tokens += r.input_tokens
-    run.total_output_tokens += r.output_tokens
-    log_event(db, run.id, "llm_call", model=r.model, stop_reason=r.stop_reason,
-              input_tokens=r.input_tokens, output_tokens=r.output_tokens,
-              text=r.text, tool_calls=r.tool_calls, otel_trace_id=current_trace_id())
     steps = state.get("steps", 0) + 1
     if r.stop_reason == "refusal":
         return {"answer": "Sorry, I can't help with that request.", "tool_calls": [], "steps": steps}
@@ -147,14 +156,17 @@ def tools(state, db, run):
     results = []
     for tc in state["tool_calls"]:
         if approved:
+            started = time.perf_counter()
             with tracer.start_as_current_span(f"execute_tool {tc['name']}"):
                 out = send_greeting(**tc["input"])
+            duration_ms = round((time.perf_counter() - started) * 1000, 1)
             results.append(ToolMessage(out, tool_call_id=tc["id"]))
         else:
             d = state.get("decision", {})
             out = f"Declined by human reviewer {d.get('approver', '')}. {d.get('note', '')}".strip()
+            duration_ms = 0
             results.append(ToolMessage(out, tool_call_id=tc["id"], status="error"))
-        log_event(db, run.id, "tool_result", actor="tool", tool=tc["name"], result=out)
+        log_event(db, run.id, "tool_result", actor="tool", tool=tc["name"], result=out, duration_ms=duration_ms)
     return {"messages": [*state["messages"], *results],
             "tool_calls": [], "decision": {}, "denied": state.get("denied", False) or not approved}
 
@@ -196,7 +208,8 @@ def judge_node(state, db, run):
     except Exception as e:   # a judge outage must never cost the user their answer
         log_event(db, run.id, "judge_error", actor="judge", error=f"{type(e).__name__}: {e}")
     log_event(db, run.id, "run_finished", status=run.status, output=run.output,
-              total_input_tokens=run.total_input_tokens, total_output_tokens=run.total_output_tokens)
+              total_input_tokens=run.total_input_tokens, total_output_tokens=run.total_output_tokens,
+              llm=summarize_llm_calls([e.data for e in llm_calls(db, run.id)]))
     return {}
 
 

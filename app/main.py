@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from app import agent
-from app.audit import AuditEvent, Run, SessionLocal, verify_chain
+from app.audit import AuditEvent, Run, SessionLocal, llm_calls, summarize_llm_calls, verify_chain
 from app.config import settings
 
 app = FastAPI(title="HelloBot - Responsible AI Agent",
@@ -87,6 +87,14 @@ def run_events(run_id: str):
         return db.scalars(select(AuditEvent).where(AuditEvent.run_id == run_id).order_by(AuditEvent.id)).all()
 
 
+@app.get("/api/runs/{run_id}/llm-calls", tags=["observability"])
+def run_llm_calls(run_id: str):
+    """Every model call in a run: timing, tokens, sizes, and the full request and response."""
+    with SessionLocal() as db:
+        calls = [e.data for e in llm_calls(db, run_id)]
+    return {"summary": summarize_llm_calls(calls), "calls": calls}
+
+
 @app.get("/api/audit/verify", tags=["audit"])
 def audit_verify():
     with SessionLocal() as db:
@@ -100,12 +108,15 @@ def metrics():
         runs = db.scalars(select(Run).where(Run.judge.is_not(None))).all()
         guard = db.scalars(select(AuditEvent).where(AuditEvent.event.in_(["input_guardrail", "output_guardrail"]))).all()
         tokens = db.execute(select(func.sum(Run.total_input_tokens), func.sum(Run.total_output_tokens))).one()
+        calls = [e.data for e in llm_calls(db)]
     scores = [r.judge["score"] for r in runs]
     policies: dict = {}
     for e in guard:
         for v in e.data.get("violations", []):
             policies[v["policy"]] = policies.get(v["policy"], 0) + 1
-    return {"runs_by_status": by_status, "avg_judge_score": round(sum(scores) / len(scores), 2) if scores else None,
+    timed = [c["duration_ms"] for c in calls if c.get("duration_ms") is not None]
+    return {"llm": {**summarize_llm_calls(calls), "avg_duration_ms": round(sum(timed) / len(timed), 1) if timed else None},
+            "runs_by_status": by_status, "avg_judge_score": round(sum(scores) / len(scores), 2) if scores else None,
             "judge_pass_rate": round(sum(r.judge["passed"] for r in runs) / len(runs), 2) if runs else None,
             "guardrail_hits": policies, "input_tokens": tokens[0] or 0, "output_tokens": tokens[1] or 0}
 

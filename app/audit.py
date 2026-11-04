@@ -76,6 +76,23 @@ def log_event(db: Session, run_id: str, event: str, actor: str = "agent", **data
         return ev
 
 
+def llm_calls(db: Session, run_id: str | None = None) -> list[AuditEvent]:
+    query = select(AuditEvent).where(AuditEvent.event == "llm_call").order_by(AuditEvent.id)
+    return db.scalars(query.where(AuditEvent.run_id == run_id) if run_id else query).all()
+
+
+def summarize_llm_calls(calls: list[dict]) -> dict:
+    """Totals across llm_call event data. Events from before this was recorded count as 0."""
+    def total(key):
+        return sum(c.get(key) or 0 for c in calls)
+    return {"calls": len(calls), "errors": sum(c.get("status") == "error" for c in calls),
+            "duration_ms": round(total("duration_ms"), 1), "input_tokens": total("input_tokens"),
+            "output_tokens": total("output_tokens"),
+            "total_tokens": sum(c.get("total_tokens") or (c.get("input_tokens") or 0) + (c.get("output_tokens") or 0)
+                                for c in calls),
+            "request_bytes": total("request_bytes"), "response_bytes": total("response_bytes")}
+
+
 def verify_chain(db: Session) -> dict:
     prev = GENESIS
     events = db.scalars(select(AuditEvent).order_by(AuditEvent.id)).all()
