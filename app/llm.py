@@ -54,6 +54,10 @@ class LLMResponse:
 @lru_cache(maxsize=8)
 def _model(name: str):
     from langchain.chat_models import init_chat_model
+    if _provider(name) == "ollama":
+        # ChatOllama silently ignores max_tokens. Thinking is off because it made local
+        # models about 5x slower here, enough to outlast the dashboard's request timeout.
+        return init_chat_model(name, num_predict=settings.max_output_tokens, reasoning=False)
     return init_chat_model(name, max_tokens=settings.max_output_tokens)
 
 

@@ -88,7 +88,7 @@ Set `AGENT_MODEL` to any tool-calling chat model as `provider:model`, plus that 
 | Mistral | `mistralai:mistral-large-latest` | `MISTRAL_API_KEY` |
 | Anthropic | `anthropic:<model-name>` | `ANTHROPIC_API_KEY` |
 | Google Gemini | `google_genai:gemini-3.6-flash` | `GEMINI_API_KEY` |
-| Local (Ollama) | `ollama:llama3.1` (`pip install langchain-ollama`) | none |
+| Local (Ollama) | `ollama:gemma4:12b` (any tool-capable model from `ollama list`) | none |
 
 `JUDGE_MODEL` is optional. A different, stronger model makes a better judge than the agent grading itself.
 

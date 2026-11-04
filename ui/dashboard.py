@@ -8,7 +8,7 @@ import streamlit as st
 
 API = os.getenv("API_URL", "http://localhost:8000")
 JAEGER = os.getenv("JAEGER_UI_URL", "http://localhost:16686")
-http = httpx.Client(base_url=API, timeout=120)
+http = httpx.Client(base_url=API, timeout=300)   # a run on a local model can take minutes
 
 st.set_page_config(page_title="HelloBot · Responsible AI Agent", page_icon="🤖", layout="wide")
 
