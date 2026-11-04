@@ -70,28 +70,27 @@ header.top p { margin: 4px 0 0; color: var(--muted); max-width: 62ch; }
 .pill.bad { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
 .pill.info { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 
-/* pipeline strip */
-.pipeline { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); overflow: hidden; }
-.stage { padding: 12px 14px; border-right: 1px solid var(--line); display: grid; gap: 2px; position: relative; min-width: 0; }
-.stage:last-child { border-right: 0; }
+/* pipeline summary (inside the live trace panel) */
+.pipeline { display: grid; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); overflow: hidden; }
+.stage { display: grid; grid-template-columns: 2.2em minmax(0, 1fr) auto; align-items: baseline; gap: 8px; padding: 7px 12px 7px 14px; border-bottom: 1px solid var(--line); position: relative; min-width: 0; }
+.stage:last-child { border-bottom: 0; }
 .stage .num { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); }
-.stage .name { font-weight: 600; font-size: 0.92rem; }
-.stage .state { font-size: 0.8rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.stage::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: transparent; transition: background .3s; }
-.stage[data-s="active"]::after { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
-.stage[data-s="ok"]::after { background: var(--ok); }
-.stage[data-s="warn"]::after { background: var(--warn); }
-.stage[data-s="bad"]::after { background: var(--bad); }
+.stage .name { font-weight: 600; font-size: 0.88rem; }
+.stage .state { font-size: 0.8rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 22ch; text-align: right; }
+.stage::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: transparent; transition: background .3s; }
+.stage[data-s="active"]::before { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+.stage[data-s="ok"]::before { background: var(--ok); }
+.stage[data-s="warn"]::before { background: var(--warn); }
+.stage[data-s="bad"]::before { background: var(--bad); }
+.stage[data-s="active"] .state { color: var(--accent); }
 .stage[data-s="ok"] .state { color: var(--ok); }
 .stage[data-s="warn"] .state { color: var(--warn); }
 .stage[data-s="bad"] .state { color: var(--bad); }
 @keyframes pulse { 50% { opacity: .35; } }
-@media (prefers-reduced-motion: reduce) { .stage[data-s="active"]::after { animation: none; } }
-@media (max-width: 720px) {
-  .pipeline { grid-template-columns: 1fr; }
-  .stage { border-right: 0; border-bottom: 1px solid var(--line); grid-template-columns: auto 1fr auto; align-items: baseline; gap: 10px; }
-  .stage:last-child { border-bottom: 0; }
-}
+@media (prefers-reduced-motion: reduce) { .stage[data-s="active"]::before { animation: none; } }
+.trace-label { margin-top: 4px; }
+.result { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: space-between; padding: 10px 14px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--panel); }
+.result a { color: var(--accent); font-weight: 600; }
 
 /* tabs */
 nav.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); overflow-x: auto; }
@@ -188,18 +187,11 @@ footer { color: var(--muted); font-size: 0.82rem; }
     <div>
       <div class="label">Responsible AI agent · TCS AI Friday</div>
       <h1>HelloBot Control Room</h1>
-      <p>A deliberately simple greeting agent wrapped in five enterprise controls. Every message passes through the pipeline below, and every step is written to a tamper-evident audit log.</p>
+      <p>A deliberately simple greeting agent wrapped in five enterprise controls. Every message passes through all five, and each step is written to a tamper-evident audit log. Watch them fire in the live trace next to the chat.</p>
     </div>
     <div class="mode" id="mode"><span class="pill"><span class="dot"></span>Connecting…</span></div>
   </header>
 
-  <section class="pipeline" aria-label="Control pipeline for the latest run">
-    <div class="stage" id="st-input"><span class="num">01</span><span class="name">Input guardrails</span><span class="state">Waiting</span></div>
-    <div class="stage" id="st-agent"><span class="num">02</span><span class="name">Agent · Claude</span><span class="state">Waiting</span></div>
-    <div class="stage" id="st-human"><span class="num">03</span><span class="name">Human in the loop</span><span class="state">Waiting</span></div>
-    <div class="stage" id="st-output"><span class="num">04</span><span class="name">Output guardrails</span><span class="state">Waiting</span></div>
-    <div class="stage" id="st-judge"><span class="num">05</span><span class="name">LLM judge</span><span class="state">Waiting</span></div>
-  </section>
 
   <nav class="tabs" aria-label="Sections">
     <a href="#chat" data-tab="chat">Chat</a>
@@ -222,6 +214,14 @@ footer { color: var(--muted); font-size: 0.82rem; }
     </div>
     <div class="panel stack">
       <div class="row" style="justify-content:space-between"><h2>Live trace</h2><span class="mono muted" id="liveRunId"></span></div>
+      <section class="pipeline" aria-label="Controls for the latest message">
+        <div class="stage" id="st-input"><span class="num">01</span><span class="name">Input guardrails</span><span class="state">Waiting</span></div>
+        <div class="stage" id="st-agent"><span class="num">02</span><span class="name">Agent · Claude</span><span class="state">Waiting</span></div>
+        <div class="stage" id="st-human"><span class="num">03</span><span class="name">Human in the loop</span><span class="state">Waiting</span></div>
+        <div class="stage" id="st-output"><span class="num">04</span><span class="name">Output guardrails</span><span class="state">Waiting</span></div>
+        <div class="stage" id="st-judge"><span class="num">05</span><span class="name">LLM judge</span><span class="state">Waiting</span></div>
+      </section>
+      <div class="label trace-label">Step by step</div>
       <div class="timeline" id="liveTrace"><div class="empty">Send a message to see each control fire, step by step.</div></div>
     </div>
   </section>
@@ -229,6 +229,7 @@ footer { color: var(--muted); font-size: 0.82rem; }
   <!-- APPROVALS -->
   <section id="view-approvals" class="stack" hidden>
     <div><h2>Approval queue</h2><p class="muted" style="margin:4px 0 0">Tools with side effects pause the agent. A reviewer approves or denies, and the agent must tell the user honestly what happened. Anyone with edit access to this page can review from another device.</p></div>
+    <div id="approvalResult"></div>
     <div class="stack" id="approvalList"></div>
   </section>
 
@@ -277,7 +278,7 @@ footer { color: var(--muted); font-size: 0.82rem; }
     </div>
   </section>
 
-  <footer>Reference implementation: Python · FastAPI · OpenTelemetry · SQLAlchemy · pytest · Docker. This page is the same pipeline in the browser, with Claude answering through the viewer's own Claude account.</footer>
+  <footer>Reference implementation: Python · LangGraph · FastAPI · OpenTelemetry · SQLAlchemy · pytest · Docker. This page is the same pipeline in the browser, with Claude answering through the viewer's own Claude account.</footer>
 </div>
 
 <script>
@@ -740,7 +741,8 @@ async function renderApprovals() {
     const act = async (ok) => {
       approve.disabled = deny.disabled = true;
       resetStages();
-      await decide(r, ok, myId || "reviewer", note.value.trim());
+      const done = await decide(r, ok, myId || "reviewer", note.value.trim());
+      showDecision(done, ok);
       renderAll(); renderChat();
     };
     approve.addEventListener("click", () => act(true));
@@ -752,6 +754,16 @@ async function renderApprovals() {
       el("label", { class: "label", for: noteId, text: "Reviewer note" }), note,
       el("div", { class: "row" }, approve, deny)));
   }
+}
+
+function showDecision(run, ok) {
+  const j = run && run.judge;
+  $("#approvalResult").replaceChildren(el("div", { class: "result" },
+    el("div", { class: "row" },
+      el("span", { class: "pill " + (ok ? "ok" : "bad") }, el("span", { class: "dot" }), ok ? "Approved" : "Denied"),
+      el("span", { text: ok ? `Greeting sent. HelloBot told the user: "${run.output}"` : `Nothing was sent. HelloBot told the user: "${run.output}"` }),
+      j ? el("span", { class: "pill " + (j.passed ? "ok" : "bad"), text: `Judge ${j.score}/5` }) : null),
+    el("a", { href: "#chat", text: "See the full trace in Chat" })));
 }
 
 /* audit */
