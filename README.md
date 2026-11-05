@@ -34,24 +34,23 @@ Activate the virtual environment (`source .venv/bin/activate`) in every new term
 cp .env.example .env
 ```
 
-Then edit `.env` and pick **one** option. Do this before starting: the default in `.env.example` is OpenAI, and without a key the app starts normally but every message fails.
+Then edit `.env` and pick **one** option. Do this before starting: the default in `.env.example` is Gemini 3.5 Flash Lite, and without `GEMINI_API_KEY` the app starts normally but every message fails.
 
 | Option | In `.env` | Needs |
 |---|---|---|
 | No model (offline stub) | `AGENT_MODEL=` | Nothing. Replies are scripted, but every control still runs |
 | Ollama (local) | `AGENT_MODEL=ollama:gemma4:12b` | `ollama serve` running, and the model pulled with `ollama pull gemma4:12b` |
-| Google Gemini | `AGENT_MODEL=google_genai:gemini-3.6-flash` | `GEMINI_API_KEY` |
+| Google Gemini (default) | `AGENT_MODEL=google_genai:gemini-3.5-flash-lite` | `GEMINI_API_KEY` |
 | OpenAI | `AGENT_MODEL=openai:gpt-4.1` | `OPENAI_API_KEY` |
 | Mistral | `AGENT_MODEL=mistralai:mistral-large-latest` | `MISTRAL_API_KEY` |
 | Anthropic | `AGENT_MODEL=anthropic:<model-name>` | `ANTHROPIC_API_KEY` |
 
 Any tool-calling chat model works as `provider:model`. For Ollama, `ollama list` shows what you have and `ollama show <model>` must list `tools` under its capabilities.
 
-**To switch models later:** keep one `AGENT_MODEL` line uncommented, then restart the API. Editing `.env` alone doesn't trigger a reload.
+**To switch models later:** open the **⚙️ Settings** tab and pick Gemini 3.5 Flash Lite, Ollama or the offline stub. No restart is needed, and the choice is saved in SQLite. Once you've picked one there, it overrides `AGENT_MODEL` in `.env`, so later edits to that line have no effect. To use another model, set `AGENT_MODEL` in `.env`, and if a choice is already saved, clear it with the command below and restart the API.
 
 ```bash
-AGENT_MODEL=ollama:gemma4:12b
-# AGENT_MODEL=google_genai:gemini-3.6-flash
+sqlite3 hello_agent.db "DELETE FROM settings WHERE key = 'agent_model';"
 ```
 
 ### 3. Start the app
@@ -109,7 +108,7 @@ To use Ollama on your own machine from the containers, also set `OLLAMA_HOST=htt
 |---|---|
 | Run shows **Failed**: "couldn't reach the model" | Open the `Error` event in the live trace for the reason. Usually a missing API key, an exhausted quota (Gemini's free tier is limited per day), or Ollama not running |
 | "Backend not reachable" | The API isn't running. Start it with `make api` |
-| New model not used after editing `.env` | Restart the API. `/health` shows the model in use |
+| New model not used after editing `.env` | A choice saved in **Settings** overrides `.env`. Pick the model there, or clear the saved choice as in step 2 and restart the API. `/health` shows the model in use |
 | `make: uvicorn: No such file or directory` or `pip: command not found` | The virtual environment isn't active. Run `source .venv/bin/activate` |
 | `address already in use` | Something is already on that port. Find it with `lsof -nP -iTCP:8000 -sTCP:LISTEN` (or `8501`) |
 | A run in progress suddenly shows **Failed** | The API restarted, which ends runs in progress. `make api` restarts whenever Python files change |
@@ -266,6 +265,8 @@ The dashboard sends the ids of the earlier runs in the conversation (`context_ru
 | `llm_judge`, `judge_error` | The quality score, or why there isn't one |
 | `error`, `run_finished` | A run failed; a run ended |
 
+**`settings`:** `key`, `value` and `updated_at`. It holds the model chosen in the dashboard. A change isn't an audit event, since events belong to a run, but every `llm_call` event records the model it used.
+
 Paused runs live in a separate LangGraph checkpoint database (`checkpoints.db`). That's why a reviewer can decide after an API restart.
 
 ### API
@@ -281,6 +282,7 @@ Paused runs live in a separate LangGraph checkpoint database (`checkpoints.db`).
 | `GET /api/runs/{id}/llm-calls` | The run's model calls, with totals |
 | `GET /api/audit/verify` | Verify the hash chain |
 | `GET /api/metrics` | Status counts, judge scores, human decisions, guardrail hits, LLM totals |
+| `GET /api/settings/model`, `PUT /api/settings/model` | The selected model and options; save a new choice. Returns 400 for an unknown model, 409 for one that can't be used right now |
 | `GET /api/graph` | The agent graph as Mermaid |
 | `POST /api/evals` | Run the suite and wait for the report |
 | `POST /api/evals/jobs` | Start the suite in the background. Only one runs at a time; a second request returns the running job |
@@ -295,6 +297,7 @@ Paused runs live in a separate LangGraph checkpoint database (`checkpoints.db`).
 | **Audit trail** | Click a run to explain it. **Simulate tampering** edits a copy in the page to show the chain breaking; the stored log isn't touched |
 | **Evals** | Runs the golden dataset with per-case progress and a **Stop** button, and offers the report as a download |
 | **Metrics** | Run counts, judge scores, human decisions, LLM totals, and guardrail hits by policy |
+| **Settings** | Switch the model. Options that can't be used right now are listed with the reason, such as a missing key or Ollama not running |
 
 The page polls only while something is running, and only the visible tab does any work. When a run finishes, the whole page redraws, which unlocks the input and updates the approval count.
 
@@ -315,7 +318,7 @@ Set these in `.env` or as environment variables.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT_MODEL` | empty | `provider:model`. Empty means the offline stub |
+| `AGENT_MODEL` | empty | `provider:model`, used until a choice is saved in **Settings**. Empty means the offline stub |
 | `JUDGE_MODEL` | `AGENT_MODEL` | A separate, ideally stronger model for judging |
 | `FORCE_OFFLINE` | `false` | Use the stub even when a model is set |
 | `MAX_OUTPUT_TOKENS` | `4000` | Output limit per model call |
@@ -337,6 +340,7 @@ This is a reference implementation, and these matter before any real use:
 - **The approval queue is shared.** Everyone using the same API sees and can decide the same requests.
 - **The judge can wrongly fail a correct "email sent" reply.** It sees the conversation and the answer but not which tools ran, so it may call a real send a hallucination.
 - **`send_greeting` is a stand-in.** It sends no email.
+- **Switching the model during a paused run** means that run finishes on the new model.
 - **One API process only.** Runs and eval jobs live in that process, so a restart ends them, and eval job progress is lost.
 - **Under Docker, `CHECKPOINT_DB` isn't on the data volume.** Paused runs can't be resumed once the container is recreated.
 - **Regex PII detection** can miss things, and the interface is there to swap in a real detector.
@@ -363,6 +367,7 @@ app/
   guardrails.py  input/output policies, PII redaction
   graph.py       LangGraph state machine: nodes, routing, interrupt, SQLite checkpointer
   agent.py       run lifecycle: create, execute, resume, fail, conversation context
+  model_choice.py  the selected model: options, availability, saved in SQLite
   judge.py       LLM-as-judge with structured output
   audit.py       runs + hash-chained audit events (SQLAlchemy)
   telemetry.py   OpenTelemetry setup (OTLP exporter)

@@ -6,7 +6,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from app import agent
+from app import agent, model_choice
 from app.audit import AuditEvent, Run, SessionLocal, llm_calls, summarize_llm_calls, verify_chain
 from app.config import settings
 
@@ -26,6 +26,10 @@ class ChatIn(BaseModel):
     message: str = Field(..., examples=["Please email a hello to Alice at alice@example.com"])
     context_run_ids: list[str] = Field(default=[], description="Earlier runs in this conversation, oldest first")
     background: bool = Field(default=False, description="Return at once and poll the run for progress")
+
+
+class ModelIn(BaseModel):
+    model: str = Field(..., examples=[model_choice.GEMINI])
 
 
 class DecisionIn(BaseModel):
@@ -154,6 +158,22 @@ def metrics():
             "human_decisions": {"approved": sum(bool(e.data.get("approved")) for e in decisions),
                                 "denied": sum(not e.data.get("approved") for e in decisions)},
             "guardrail_hits": policies, "input_tokens": tokens[0] or 0, "output_tokens": tokens[1] or 0}
+
+
+@app.get("/api/settings/model", tags=["settings"])
+def get_model():
+    return model_choice.describe()
+
+
+@app.put("/api/settings/model", tags=["settings"])
+def set_model(body: ModelIn):
+    """Save the model choice. New model calls use it at once, and it survives restarts."""
+    try:
+        return model_choice.select(body.model)
+    except KeyError:
+        raise HTTPException(400, f"unknown model: {body.model}")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
 
 
 @app.get("/api/graph", tags=["observability"])

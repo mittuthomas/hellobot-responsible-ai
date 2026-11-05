@@ -3,7 +3,7 @@ refusal handling live in one place, whatever the provider.
 
 Models are chosen by a "provider:model" string, for example
     openai:gpt-4.1   mistralai:mistral-large-latest   anthropic:<model>
-    google_genai:gemini-3.6-flash   ollama:llama3.1
+    google_genai:gemini-3.5-flash-lite   ollama:gemma4:12b
 and created with LangChain's standard chat-model interface (init_chat_model), so the
 same code drives any provider that supports tool calling. Each provider reads its own
 API key from the environment (OPENAI_API_KEY, MISTRAL_API_KEY, ...).

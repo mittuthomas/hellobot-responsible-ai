@@ -5,12 +5,15 @@ import hashlib
 from langgraph.types import Command
 from sqlalchemy import select, update
 
+from app import model_choice
 from app.audit import Run, SessionLocal, log_event
 from app.graph import graph, stash_raw_input
 from app.telemetry import tracer
 
 MAX_CONTEXT_TURNS = 16   # 8 user/assistant exchanges
 FAILED_REPLY = "Sorry, I couldn't reach the model just now. Please try again."
+
+model_choice.apply_saved()   # here so the API and `make evals` both use the saved model
 
 
 def _config(run_id: str) -> dict:

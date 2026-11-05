@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # "provider:model", e.g. openai:gpt-4.1, mistralai:mistral-large-latest, anthropic:<model>,
-    # google_genai:gemini-3.6-flash, ollama:llama3.1
+    # google_genai:gemini-3.5-flash-lite, ollama:gemma4:12b
     agent_model: str | None = None
     judge_model: str | None = None        # defaults to agent_model; a stronger model is better
     max_output_tokens: int = 4000

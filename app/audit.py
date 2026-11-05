@@ -55,6 +55,14 @@ class AuditEvent(Base):
     hash: Mapped[str] = mapped_column(String(64))
 
 
+class Setting(Base):
+    """Choices made in the dashboard that must survive a restart. Not part of the audit chain."""
+    __tablename__ = "settings"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 Base.metadata.create_all(engine)
 
 
